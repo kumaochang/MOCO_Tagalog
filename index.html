@@ -26,6 +26,20 @@ header p { font-size: 0.85em; opacity: 0.8; margin-top: 4px; }
 .mode-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
 .mode-row label { cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 0.9em; }
 
+.sim-panel { margin-top: 12px; display: none; }
+.sim-panel.active { display: block; }
+.sim-panel .sim-mods { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.88em; margin-bottom: 8px; }
+.sim-panel .sim-mods label { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+.sim-panel .sim-note { font-size: 0.8em; color: #7f8c8d; line-height: 1.6; }
+.simbtn { padding: 3px 10px; background: white; color: #3498db; border: 1px solid #3498db; border-radius: 12px; cursor: pointer; font-size: 0.75em; margin-left: 8px; vertical-align: 1px; }
+.simbtn:hover { background: #eaf2f8; }
+.query-card { border: 2px solid #3498db; background: #f4f9fd; }
+.query-tag { display: inline-block; background: #3498db; color: white; border-radius: 4px; padding: 1px 8px; font-size: 0.75em; margin-right: 6px; }
+.sim-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.sim-score { font-family: monospace; font-size: 0.85em; color: #2c3e50; min-width: 4.2em; }
+.sim-bar { flex: 1; max-width: 300px; height: 6px; background: #ecf0f1; border-radius: 3px; overflow: hidden; }
+.sim-bar > div { height: 100%; background: #3498db; border-radius: 3px; }
+
 .gesture-panel { margin-top: 12px; display: none; flex-wrap: wrap; gap: 6px; }
 .gesture-panel.active { display: flex; }
 .gesture-panel label { background: #ecf0f1; padding: 4px 10px; border-radius: 4px; font-size: 0.82em; cursor: pointer; }
@@ -92,6 +106,16 @@ header p { font-size: 0.85em; opacity: 0.8; margin-top: 4px; }
       <label><input type="radio" name="mode" value="phone" onchange="onModeChange()"> 音素</label>
       <label><input type="radio" name="mode" value="allophone" onchange="onModeChange()"> 同位音 (IPA)</label>
       <label><input type="radio" name="mode" value="gesture" onchange="onModeChange()"> 手勢</label>
+      <label id="similarModeLabel" style="display:none;"><input type="radio" name="mode" value="similar" onchange="onModeChange()"> 相似句（以例查詢）</label>
+    </div>
+    <div class="sim-panel" id="simPanel">
+      <div class="sim-mods" id="simMods"></div>
+      <div class="sim-note" id="simNote"></div>
+      <div class="sim-presets" style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+        <span style="font-size:0.8em; color:#7f8c8d; align-self:center;">範例查詢：</span>
+        <button type="button" class="simbtn" style="margin-left:0;" onclick="presetSim(62,'prosody')">列舉語調——用節奏找出所有地名串（韻律）</button>
+        <button type="button" class="simbtn" style="margin-left:0;" onclick="presetSim(100,'semantic')">勸勉族語傳承——用字不同的同一言語行為（語意）</button>
+      </div>
     </div>
     <div class="ipa-panel" id="ipaPanel"></div>
     <div class="gesture-panel" id="gesturePanel"></div>
@@ -109,6 +133,9 @@ header p { font-size: 0.85em; opacity: 0.8; margin-top: 4px; }
 let corpus = null;
 let currentResults = [];
 let selectedIdx = -1;
+let simData = null;     // corpus_sim.json（相似度矩陣；由 build_similarity.py 產生）
+let simQuery = null;    // 目前的查詢句 index
+let simMod = "semantic";
 const VIDEO_SRC = "https://github.com/kumaochang/MOCO_Tagalog/releases/download/v1.0/full_video.mp4";
 let sharedVideo = null;
 let sharedVideoSrc = "";
@@ -187,6 +214,59 @@ fetch("corpus.json")
     document.getElementById("statsText").textContent = "載入 corpus.json 失敗: " + e.message;
   });
 
+// 相似度資料（選配）：載入成功才顯示「相似句」模式
+fetch("corpus_sim.json")
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+  .then(data => {
+    // 防呆：corpus.json 更新後若未重跑 build_similarity.py，句數會對不上——此時隱藏相似句模式
+    const check = () => {
+      if (data.sim.semantic.length !== corpus.utterances.length) {
+        console.warn("corpus_sim.json 句數與 corpus.json 不符，已停用相似句模式（請重跑 build_similarity.py）");
+        return;
+      }
+      simData = data;
+      document.getElementById("similarModeLabel").style.display = "";
+      buildSimPanel();
+      renderResults();   // 讓已渲染的卡片補上「找相似句」按鈕
+    };
+    if (corpus) check();
+    else {
+      const wait = setInterval(() => { if (corpus) { clearInterval(wait); check(); } }, 100);
+    }
+  })
+  .catch(() => { /* 無 corpus_sim.json 時維持原有功能 */ });
+
+function buildSimPanel() {
+  document.getElementById("simMods").innerHTML = Object.entries(simData.modalities).map(([k, m]) =>
+    `<label><input type="radio" name="simMod" value="${k}" ${k === simMod ? "checked" : ""}> ${m.name_zh}（${m.valid_count} 句）</label>`
+  ).join("");
+  document.querySelectorAll('input[name="simMod"]').forEach(r =>
+    r.addEventListener("change", () => { simMod = r.value; updateSimNote(); doSearch(); }));
+  updateSimNote();
+}
+
+function updateSimNote() {
+  const m = simData.modalities[simMod];
+  document.getElementById("simNote").textContent =
+    m.note + "｜點結果卡片上的「找相似句」即以該句為查詢，依餘弦相似度排序。";
+}
+
+function findSimilar(idx) {
+  simQuery = idx;
+  document.querySelector('input[name="mode"][value="similar"]').checked = true;
+  onModeChange();
+  doSearch();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function presetSim(idx, mod) {
+  simMod = mod;
+  const r = document.querySelector(`input[name="simMod"][value="${mod}"]`);
+  if (r) r.checked = true;
+  updateSimNote();
+  findSimilar(idx);
+}
+
 function buildGesturePanel() {
   document.getElementById("gesturePanel").innerHTML = corpus.gestureInventory.map(g =>
     `<label><input type="checkbox" value="${g}"><span>${g}</span></label>`
@@ -212,12 +292,15 @@ function onModeChange() {
   const mode = document.querySelector('input[name="mode"]:checked').value;
   document.getElementById("gesturePanel").classList.toggle("active", mode === "gesture");
   document.getElementById("ipaPanel").classList.toggle("active", mode === "allophone");
+  document.getElementById("simPanel").classList.toggle("active", mode === "similar");
   document.getElementById("searchInput").placeholder = ({
     truku: "輸入太魯閣語文字...", chinese: "輸入中文翻譯...",
     phone: "輸入音素序列（如 ami 或 a m i）...",
     allophone: "輸入同位音序列（點擊下方 IPA 按鈕）...",
     gesture: "勾選下方手勢標籤...",
+    similar: "（此模式不用輸入文字：點結果卡片上的「找相似句」）",
   })[mode] || "";
+  if (mode === "similar") doSearch();
 }
 
 function fmt(sec) {
@@ -271,6 +354,17 @@ function doSearch() {
       }
       return false;
     });
+  } else if (mode === "similar") {
+    if (!simData || simQuery === null) { showAll(); return; }
+    const valid = simData.valid[simMod];
+    if (!valid[simQuery]) {
+      currentResults = [];
+    } else {
+      const row = simData.sim[simMod][simQuery];
+      currentResults = corpus.utterances.map((u,i)=>({utt:u,idx:i,sim:row[i]}))
+        .filter(x => x.idx !== simQuery && valid[x.idx])
+        .sort((a,b) => b.sim - a.sim);
+    }
   }
   selectedIdx = -1;
   renderResults();
@@ -281,25 +375,50 @@ function renderResults() {
   const query = document.getElementById("searchInput").value.trim();
   const gc = mode==="gesture" ? new Set([...document.querySelectorAll("#gesturePanel input:checked")].map(c=>c.value)) : new Set();
 
-  document.getElementById("statsText").textContent = `搜尋結果: ${currentResults.length} / ${corpus.utterances.length} 筆`;
+  const isSim = mode === "similar" && simData && simQuery !== null;
+  if (isSim) {
+    const mName = simData.modalities[simMod].name_zh;
+    document.getElementById("statsText").textContent =
+      `相似句檢索（${mName}）: 依相似度排序 ${currentResults.length} 句（已排除無此模態資料者）`;
+  } else {
+    document.getElementById("statsText").textContent = `搜尋結果: ${currentResults.length} / ${corpus.utterances.length} 筆`;
+  }
 
-  const html = currentResults.map(({utt, idx}) => {
+  const simBtn = idx => simData ? `<button class="simbtn" onclick="event.stopPropagation();findSimilar(${idx})">找相似句</button>` : "";
+
+  const cardHtml = (item, extraClass, tag) => {
+    const utt = item.utt, idx = item.idx;
     const ps = utt.phones.map(p=>p.l).join(" ");
     const gl = new Set();
     (utt.gestures_sp1||[]).forEach(g=>g.labels.forEach(l=>gl.add(l)));
     (utt.gestures_sp2||[]).forEach(g=>g.labels.forEach(l=>gl.add(l)));
     const gt = [...gl].map(l=>`<span class="${gc.has(l)?"matched":""}">${l}</span>`).join("");
-
-    return `<div class="result-card" data-idx="${idx}" id="result-${idx}">
-      <div class="result-time">${fmt(utt.start)} - ${fmt(utt.end)}</div>
+    const simRow = (item.sim !== undefined && isSim)
+      ? `<div class="sim-row"><span class="sim-score">${item.sim.toFixed(4)}</span><div class="sim-bar"><div style="width:${Math.max(4, Math.min(100, ((item.sim - minSim) / ((maxSim - minSim) || 1)) * 100))}%"></div></div></div>`
+      : "";
+    return `<div class="result-card ${extraClass||""}" data-idx="${idx}" id="result-${idx}">
+      <div class="result-time">${tag||""}${fmt(utt.start)} - ${fmt(utt.end)}${simBtn(idx)}</div>
       <div class="result-truku">${highlight(utt.truku, query, mode==="truku")}</div>
       <div class="result-chinese">${highlight(utt.chinese, query, mode==="chinese")}</div>
+      ${simRow}
       <div class="result-meta">
         ${ps ? `<div class="phone-seq">${esc(ps.substring(0,80))}${ps.length>80?"...":""}</div>` : ""}
         ${gt ? `<div class="gesture-tags">${gt}</div>` : ""}
       </div>
     </div>`;
-  }).join("");
+  };
+
+  let maxSim = 0, minSim = 0;
+  if (isSim && currentResults.length) {
+    maxSim = currentResults[0].sim;
+    minSim = currentResults[currentResults.length - 1].sim;
+  }
+
+  let html = currentResults.map(item => cardHtml(item)).join("");
+  if (isSim) {
+    const qCard = cardHtml({ utt: corpus.utterances[simQuery], idx: simQuery }, "query-card", '<span class="query-tag">查詢句</span>');
+    html = qCard + (html || '<div class="no-data">此句沒有所選模態的資料，請換一個模態或查詢句</div>');
+  }
 
   document.getElementById("resultsList").innerHTML = html || '<div class="no-data">沒有找到匹配的結果</div>';
 
